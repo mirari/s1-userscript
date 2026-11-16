@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.5.1
+// @version      1.5.2
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -308,7 +308,7 @@ let renderSyncStatus = null;
 function syncStatus(message, notify = false) {
  try { GM_setValue(SYNC_STATUS, message); } catch { /* Still show feedback if storage is unavailable. */ }
  renderSyncStatus?.(message);
- if (notify) showToast(message, 8000);
+ if (notify) showToast(message.startsWith('保存失败') ? '保存失败' : message.startsWith('同步冲突') ? '同步冲突，请查看设置' : '同步失败', 2500);
 }
 async function withSyncLease(action) {
  if (syncInFlight) return {skipped:true};
@@ -413,9 +413,9 @@ function settings() {
  textarea{display:block;width:100%;height:240px;max-height:45vh;padding:10px;border:1px solid #aaa;border-radius:6px;font:inherit;background:#fff;color:#222;resize:vertical}
  p{font-size:13px;color:#666;margin:10px 0}button{padding:7px 18px;margin-right:8px;cursor:pointer}
  details{margin:16px 0}summary{cursor:pointer}details input:not([type="checkbox"]){width:100%;padding:6px;font:inherit}details button{margin-bottom:8px}
- #status{position:sticky;top:0;z-index:1;padding:10px;border-radius:6px;background:#f0f0f0;overflow-wrap:anywhere}#status[data-error="true"]{background:#fff0f0;color:#a21b1b;border:1px solid #d66}
+ #status{padding:0;background:transparent;color:#666;overflow-wrap:anywhere}#status[data-error="true"]{position:sticky;top:0;z-index:1;padding:10px;border-radius:6px;background:#fff0f0;color:#a21b1b;border:1px solid #d66}
  #status:empty{display:none}
- @media(prefers-color-scheme:dark){section{background:#252525;color:#eee}textarea{background:#181818;color:#eee;border-color:#777}p{color:#bbb}}
+ @media(prefers-color-scheme:dark){section{background:#252525;color:#eee}textarea{background:#181818;color:#eee;border-color:#777}p{color:#bbb}#status{color:#aaa}#status[data-error="true"]{background:#3b2226;color:#ffb4b4;border-color:#a95762}}
  </style><section role="dialog" aria-modal="true" aria-labelledby="title">
  <h2 id="title">S1 误伤修正名单</h2>
  <p id="status" role="status" aria-live="polite"></p>
