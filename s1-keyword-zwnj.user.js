@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.2.0
+// @version      1.3.0
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -208,11 +208,11 @@ function readSyncFile(gist) {
  if (data?.version !== 1 || typeof data.enabled !== 'boolean' || typeof data.words !== 'string') throw new Error('同步文件版本或内容不受支持。');
  return {enabled:data.enabled, words:normalizeWords(data.words)};
 }
-function gistRequest(method, id, token, data) {
+function gistRequest(method, id, token, data, page = 0) {
  if (id && !/^[a-f0-9]{20,64}$/i.test(id)) return Promise.reject(new Error('请填写有效的 Gist ID。'));
  if (!token || /\s/.test(token)) return Promise.reject(new Error('请填写有效的 GitHub 令牌。'));
  return new Promise((resolve, reject) => {
-  GM_xmlhttpRequest({method, url:'https://api.github.com/gists' + (id ? '/' + id : ''),
+  GM_xmlhttpRequest({method, url:'https://api.github.com/gists' + (id ? '/' + id : page ? '?per_page=100&page=' + page : ''),
    headers:{Authorization:'Bearer ' + token, Accept:'application/vnd.github+json', 'Content-Type':'application/json', 'X-GitHub-Api-Version':'2022-11-28', 'Cache-Control':'no-cache'},
    anonymous:true, redirect:'error', timeout:20000,
    ...(data ? {data:JSON.stringify(data)} : {}),
@@ -228,6 +228,39 @@ function gistRequest(method, id, token, data) {
    onabort:() => reject(new Error('请求已取消。'))
   });
  });
+}
+async function discoverGist(token, snapshot, allowSelect, stillValid = () => true) {
+ const candidates = new Map();
+ let complete = false;
+ for (let page = 1; page <= 100; page++) {
+  const list = await gistRequest('GET', '', token, undefined, page);
+  if (!stillValid()) throw new Error('设置已变化，请重新同步。');
+  if (!Array.isArray(list)) throw new Error('无法读取 Gist 列表，已停止创建。');
+  for (const item of list) {
+   if (item?.files?.[SYNC_FILE] && /^[a-f0-9]{20,64}$/i.test(item.id || '')) candidates.set(item.id, item);
+  }
+  if (list.length < 100) { complete = true; break; }
+ }
+ if (!complete) throw new Error('Gist 列表过长，未完成查找，请手动指定 ID。');
+ let id;
+ const matches = [...candidates.values()];
+ if (matches.length > 1) {
+  if (!allowSelect) throw new Error('找到多个同步 Gist，请在设置中手动选择 ID。');
+  const choice = prompt('找到多个同步 Gist，请输入序号：\n' + matches.map((item,i) => `${i+1}. ${item.id}`).join('\n'));
+  if (choice === null) throw new Error('已取消选择。');
+  const index = Number(choice) - 1;
+  if (!Number.isInteger(index) || index < 0 || index >= matches.length) throw new Error('请选择有效的序号。');
+  id = matches[index].id;
+ } else if (matches.length) id = matches[0].id;
+ if (id) {
+  const gist = await gistRequest('GET', id, token);
+  readSyncFile(gist); // An invalid matching file must not cause a duplicate to be created.
+  return {id, gist, created:false};
+ }
+ if (!stillValid()) throw new Error('设置已变化，请重新同步。');
+ const gist = await gistRequest('POST', '', token, {description:'S1防误伤修正设置', public:false, files:{[SYNC_FILE]:{content:syncPayload(snapshot)}}});
+ if (!/^[a-f0-9]{20,64}$/i.test(gist?.id || '')) throw new Error('未获得有效的 Gist ID，请在 GitHub 检查创建结果。');
+ return {id:gist.id, gist, created:true};
 }
 let syncInFlight = false;
 const SYNC_STATUS = 's1-sync-status-v1';
@@ -260,8 +293,8 @@ async function withSyncLease(action) {
  } finally { syncInFlight = false; }
 }
 async function autoSync(reason = 'check') {
- const options = syncOptions();
- if (!options.auto || options.paused || !options.id || !options.token) return {skipped:true};
+ let options = syncOptions();
+ if (!options.auto || options.paused || !options.token) return {skipped:true};
  if (reason === 'check' && (document.visibilityState === 'hidden' || refreshSettings)) return {skipped:true};
  try {
   return await withSyncLease(async ownsLease => {
@@ -276,7 +309,14 @@ async function autoSync(reason = 'check') {
     return ownsLease() && current.auto && !current.paused && current.id === options.id && current.token === options.token && current.baseline === options.baseline && syncPayload(savedConfig()) === content;
    };
    const ensureUnchanged = () => { if (!unchanged()) throw new Error('设置已变化，等待下次同步。'); };
-   const gist = await gistRequest('GET', options.id, options.token);
+   let discovered;
+   if (!options.id) {
+    discovered = await discoverGist(options.token, snapshot, reason === 'save', unchanged);
+    ensureUnchanged();
+    options = {...options, id:discovered.id};
+    GM_setValue(SYNC_KEY, options);
+   }
+   const gist = discovered?.gist || await gistRequest('GET', options.id, options.token);
    const remote = readSyncFile(gist), remoteContent = syncPayload(remote);
    ensureUnchanged();
    const commitBaseline = () => GM_setValue(SYNC_KEY, {...options, baseline:remoteContent});
@@ -285,9 +325,9 @@ async function autoSync(reason = 'check') {
    }
    const baseline = options.baseline;
    const pristineInstall = !baseline && !snapshot.words && snapshot.enabled;
-   if ((baseline === content || pristineInstall) && reason !== 'save') {
+   if ((baseline === content || pristineInstall) && (reason !== 'save' || (discovered && pristineInstall))) {
     // Never replace a draft opened while the network request was in flight.
-    if (refreshSettings) return {skipped:true};
+    if (refreshSettings && reason !== 'save') return {skipped:true};
     ensureUnchanged();
     GM_setValue('accidental-phrases-v3', remote);
     applyConfig(remote);
@@ -344,7 +384,7 @@ function settings() {
  <details><summary>Gist 同步</summary>
  <label><input id="sync-auto" type="checkbox"> 自动同步</label>
  <label>GitHub 令牌<input id="sync-token" type="password" autocomplete="off" spellcheck="false"></label>
- <label>Gist ID<input id="sync-id" type="text" spellcheck="false" placeholder="首次上传可留空"></label>
+ <label>Gist ID（可选）<input id="sync-id" type="text" spellcheck="false" placeholder="留空自动查找或创建"></label>
  <button id="upload" type="button">上传当前名单</button><button id="download" type="button">拉取名单</button>
  </details>
  <p id="status" role="status" aria-live="polite"></p>
@@ -381,7 +421,7 @@ function settings() {
    const id = get('sync-id').value.trim();
    if (id && !/^[a-f0-9]{20,64}$/i.test(id)) throw new Error('请填写有效的 Gist ID。');
    const token = get('sync-token').value.trim(), auto = get('sync-auto').checked;
-   if (auto && (!id || !token)) throw new Error('自动同步需要令牌和 Gist ID，请先上传创建或填写已有 ID。');
+   if (auto && !token) throw new Error('请填写 GitHub 令牌。');
    GM_setValue(SYNC_KEY, {id, token, auto, baseline:pulledBaseline?.id === id ? pulledBaseline.content : id === oldSync.id ? oldSync.baseline : ''});
    GM_setValue('accidental-phrases-v3', next);
    applyConfig(next);
@@ -390,6 +430,7 @@ function settings() {
     ['enabled','words','save','upload','download','sync-token','sync-id','sync-auto'].forEach(name => { get(name).disabled = true; });
     get('status').textContent = '已保存到本地，正在同步……';
     const result = await autoSync('save');
+    get('sync-id').value = syncOptions().id;
     syncing = false;
     ['enabled','words','save','upload','download','sync-token','sync-id','sync-auto'].forEach(name => { get(name).disabled = false; });
     if (!result?.ok) { get('status').textContent = result?.skipped ? '已保存到本地，等待下一次同步检查。' : GM_getValue(SYNC_STATUS, '已保存到本地。'); return; }
@@ -410,13 +451,21 @@ function settings() {
   controls.forEach(name => { get(name).disabled = true; });
   get('status').textContent = '正在同步……';
   try {
-   if (direction === 'download' && !id) throw new Error('请先填写 Gist ID。');
    if (id && !/^[a-f0-9]{20,64}$/i.test(id)) throw new Error('请填写有效的 Gist ID。');
    if (!token || /\s/.test(token)) throw new Error('请填写有效的 GitHub 令牌。');
    const connection = {id, token, auto:get('sync-auto').checked, baseline:id === previous.id ? previous.baseline : ''};
    GM_setValue(SYNC_KEY, connection);
+   let discovered;
+   if (!id) {
+    discovered = await discoverGist(token, snapshot, true, sameLocal);
+    if (!sameLocal()) throw new Error('本地设置已变化，请重新同步。');
+    id = discovered.id;
+    connection.id = id;
+    get('sync-id').value = id;
+    GM_setValue(SYNC_KEY, connection);
+   }
    if (direction === 'download') {
-    const remote = readSyncFile(await gistRequest('GET', id, token));
+    const remote = readSyncFile(discovered?.gist || await gistRequest('GET', id, token));
     if (!sameLocal()) throw new Error('本地设置已变化，请重新拉取。');
     if (syncPayload(snapshot) !== syncPayload(remote) && !confirm('用云端名单和开关替换当前编辑内容？点击保存后才会生效。')) {
      get('status').textContent = '已取消拉取。'; return;
@@ -428,7 +477,7 @@ function settings() {
    } else {
     const content = syncPayload(snapshot);
     if (id) {
-     const gist = await gistRequest('GET', id, token);
+     const gist = discovered?.gist || await gistRequest('GET', id, token);
      if (gist.public !== false) throw new Error('请使用 Secret Gist，以免名单出现在公开列表中。');
      const remote = readSyncFile(gist);
      const remoteContent = syncPayload(remote);
