@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.3.0
+// @version      1.4.0
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -199,12 +199,46 @@ function syncOptions() {
 function syncPayload(value) {
  return JSON.stringify({version:1, enabled:value.enabled, words:normalizeWords(value.words)});
 }
-function readSyncFile(gist) {
+const SYNC_AAD = 's1-anti-misfilter:v2';
+function cryptoAPI() {
+ if (!globalThis.crypto?.subtle) throw new Error('加密同步需要 HTTPS 页面及 Web Crypto 支持。');
+ return globalThis.crypto;
+}
+function toBase64(bytes) { return btoa(Array.from(bytes, b => String.fromCharCode(b)).join('')); }
+function fromBase64(text) {
+ if (typeof text !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4) throw new Error('加密数据格式错误。');
+ return Uint8Array.from(atob(text), c => c.charCodeAt(0));
+}
+async function syncCryptoKey(salt) {
+ const api = cryptoAPI();
+ const material = await api.subtle.importKey('raw', new TextEncoder().encode('s1'), 'PBKDF2', false, ['deriveKey']);
+ return api.subtle.deriveKey({name:'PBKDF2', hash:'SHA-256', salt, iterations:100000}, material, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+}
+async function encryptSyncContent(content) {
+ const api = cryptoAPI(), salt = api.getRandomValues(new Uint8Array(16)), iv = api.getRandomValues(new Uint8Array(12));
+ const encrypted = await api.subtle.encrypt({name:'AES-GCM', iv, additionalData:new TextEncoder().encode(SYNC_AAD), tagLength:128}, await syncCryptoKey(salt), new TextEncoder().encode(content));
+ const result = JSON.stringify({version:2, algorithm:'AES-256-GCM', kdf:'PBKDF2-SHA256', iterations:100000, salt:toBase64(salt), iv:toBase64(iv), data:toBase64(new Uint8Array(encrypted))});
+ if (result.length > 500000) throw new Error('加密后的名单过大，无法同步。');
+ return result;
+}
+function legacySyncFile(gist) {
+ return JSON.parse(gist.files[SYNC_FILE].content).version === 1;
+}
+async function readSyncFile(gist) {
  const file = gist?.files?.[SYNC_FILE];
  if (!file) throw new Error('Gist 中没有本脚本的同步文件。');
  if (file.truncated || typeof file.content !== 'string' || file.content.length > 500000) throw new Error('同步文件过大或不完整。');
  let data;
  try { data = JSON.parse(file.content); } catch { throw new Error('同步文件格式错误。'); }
+ if (data?.version === 2) {
+  try {
+   if (data.algorithm !== 'AES-256-GCM' || data.kdf !== 'PBKDF2-SHA256' || data.iterations !== 100000) throw new Error();
+   const salt = fromBase64(data.salt), iv = fromBase64(data.iv), ciphertext = fromBase64(data.data);
+   if (salt.length !== 16 || iv.length !== 12 || ciphertext.length < 16) throw new Error();
+   const plain = await cryptoAPI().subtle.decrypt({name:'AES-GCM', iv, additionalData:new TextEncoder().encode(SYNC_AAD), tagLength:128}, await syncCryptoKey(salt), ciphertext);
+   data = JSON.parse(new TextDecoder('utf-8', {fatal:true}).decode(plain));
+  } catch { throw new Error('同步文件解密失败或内容被修改，请确认使用 HTTPS 和支持加密的浏览器。'); }
+ }
  if (data?.version !== 1 || typeof data.enabled !== 'boolean' || typeof data.words !== 'string') throw new Error('同步文件版本或内容不受支持。');
  return {enabled:data.enabled, words:normalizeWords(data.words)};
 }
@@ -254,11 +288,13 @@ async function discoverGist(token, snapshot, allowSelect, stillValid = () => tru
  } else if (matches.length) id = matches[0].id;
  if (id) {
   const gist = await gistRequest('GET', id, token);
-  readSyncFile(gist); // An invalid matching file must not cause a duplicate to be created.
+  await readSyncFile(gist); // An invalid matching file must not cause a duplicate to be created.
   return {id, gist, created:false};
  }
  if (!stillValid()) throw new Error('设置已变化，请重新同步。');
- const gist = await gistRequest('POST', '', token, {description:'S1防误伤修正设置', public:false, files:{[SYNC_FILE]:{content:syncPayload(snapshot)}}});
+ const encryptedContent = await encryptSyncContent(syncPayload(snapshot));
+ if (!stillValid()) throw new Error('设置已变化，请重新同步。');
+ const gist = await gistRequest('POST', '', token, {description:'S1防误伤修正设置', public:false, files:{[SYNC_FILE]:{content:encryptedContent}}});
  if (!/^[a-f0-9]{20,64}$/i.test(gist?.id || '')) throw new Error('未获得有效的 Gist ID，请在 GitHub 检查创建结果。');
  return {id:gist.id, gist, created:true};
 }
@@ -317,15 +353,16 @@ async function autoSync(reason = 'check') {
     GM_setValue(SYNC_KEY, options);
    }
    const gist = discovered?.gist || await gistRequest('GET', options.id, options.token);
-   const remote = readSyncFile(gist), remoteContent = syncPayload(remote);
+   const remote = await readSyncFile(gist), remoteContent = syncPayload(remote);
    ensureUnchanged();
    const commitBaseline = () => GM_setValue(SYNC_KEY, {...options, baseline:remoteContent});
-   if (remoteContent === content) {
+   const migrate = reason === 'save' && remoteContent === content && legacySyncFile(gist);
+   if (remoteContent === content && !migrate) {
     commitBaseline(); syncStatus('已同步'); return {ok:true};
    }
    const baseline = options.baseline;
    const pristineInstall = !baseline && !snapshot.words && snapshot.enabled;
-   if ((baseline === content || pristineInstall) && (reason !== 'save' || (discovered && pristineInstall))) {
+   if (!migrate && (baseline === content || pristineInstall) && (reason !== 'save' || (discovered && pristineInstall))) {
     // Never replace a draft opened while the network request was in flight.
     if (refreshSettings && reason !== 'save') return {skipped:true};
     ensureUnchanged();
@@ -335,16 +372,18 @@ async function autoSync(reason = 'check') {
     syncStatus('已自动拉取云端名单');
     return {ok:true, pulled:true};
    }
-   if (!baseline || remoteContent !== baseline) {
+   if (!migrate && (!baseline || remoteContent !== baseline)) {
     syncStatus('同步冲突：请在设置中手动上传或拉取名单。', true);
     return {conflict:true};
    }
    if (gist.public !== false) throw new Error('自动上传需要 Secret Gist。');
    const latest = await gistRequest('GET', options.id, options.token);
    ensureUnchanged();
-   if (latest.public !== false || syncPayload(readSyncFile(latest)) !== remoteContent) throw new Error('云端已变化，等待下次同步。');
-   const result = await gistRequest('PATCH', options.id, options.token, {files:{[SYNC_FILE]:{content}}});
-   if (syncPayload(readSyncFile(result)) !== content) throw new Error('云端内容校验失败，请手动检查。');
+   if (latest.public !== false || syncPayload(await readSyncFile(latest)) !== remoteContent) throw new Error('云端已变化，等待下次同步。');
+   const encryptedContent = await encryptSyncContent(content);
+   ensureUnchanged();
+   const result = await gistRequest('PATCH', options.id, options.token, {files:{[SYNC_FILE]:{content:encryptedContent}}});
+   if (syncPayload(await readSyncFile(result)) !== content) throw new Error('云端内容校验失败，请手动检查。');
    ensureUnchanged();
    GM_setValue(SYNC_KEY, {...options, baseline:content});
    syncStatus('已自动上传名单');
@@ -465,7 +504,7 @@ function settings() {
     GM_setValue(SYNC_KEY, connection);
    }
    if (direction === 'download') {
-    const remote = readSyncFile(discovered?.gist || await gistRequest('GET', id, token));
+    const remote = await readSyncFile(discovered?.gist || await gistRequest('GET', id, token));
     if (!sameLocal()) throw new Error('本地设置已变化，请重新拉取。');
     if (syncPayload(snapshot) !== syncPayload(remote) && !confirm('用云端名单和开关替换当前编辑内容？点击保存后才会生效。')) {
      get('status').textContent = '已取消拉取。'; return;
@@ -479,28 +518,30 @@ function settings() {
     if (id) {
      const gist = discovered?.gist || await gistRequest('GET', id, token);
      if (gist.public !== false) throw new Error('请使用 Secret Gist，以免名单出现在公开列表中。');
-     const remote = readSyncFile(gist);
+     const remote = await readSyncFile(gist);
      const remoteContent = syncPayload(remote);
-     if (remoteContent !== content) {
+     if (remoteContent !== content || legacySyncFile(gist)) {
       const conflict = !connection.baseline || remoteContent !== connection.baseline;
-      if (!confirm(conflict ? '云端名单有变化或尚未建立同步基线。用当前名单覆盖云端？' : '将当前名单和开关上传并覆盖云端？')) {
+      if (remoteContent !== content && !confirm(conflict ? '云端名单有变化或尚未建立同步基线。用当前名单覆盖云端？' : '将当前名单和开关上传并覆盖云端？')) {
        get('status').textContent = '已取消上传。'; return;
       }
       const latest = await gistRequest('GET', id, token);
-      if (latest.public !== false || syncPayload(readSyncFile(latest)) !== remoteContent) throw new Error('云端在上传前发生变化，请重新检查后上传。');
+      if (latest.public !== false || syncPayload(await readSyncFile(latest)) !== remoteContent) throw new Error('云端在上传前发生变化，请重新检查后上传。');
       if (!sameLocal()) throw new Error('本地设置已变化，请重新上传。');
-      const result = await gistRequest('PATCH', id, token, {files:{[SYNC_FILE]:{content}}});
-      if (syncPayload(readSyncFile(result)) !== content) throw new Error('云端返回的内容不一致，请重新拉取检查。');
+      const encryptedContent = await encryptSyncContent(content);
+      if (!sameLocal()) throw new Error('本地设置已变化，请重新上传。');
+      const result = await gistRequest('PATCH', id, token, {files:{[SYNC_FILE]:{content:encryptedContent}}});
+      if (syncPayload(await readSyncFile(result)) !== content) throw new Error('云端返回的内容不一致，请重新拉取检查。');
      }
     } else {
      if (!sameLocal()) throw new Error('本地设置已变化，请重新上传。');
-     const result = await gistRequest('POST', '', token, {description:'S1防误伤修正设置', public:false, files:{[SYNC_FILE]:{content}}});
+     const result = await gistRequest('POST', '', token, {description:'S1防误伤修正设置', public:false, files:{[SYNC_FILE]:{content:await encryptSyncContent(content)}}});
      if (!/^[a-f0-9]{20,64}$/i.test(result.id || '')) throw new Error('未获得有效的 Gist ID，请在 GitHub 检查创建结果。');
      id = result.id;
      get('sync-id').value = id;
      // Persist the new ID immediately so a later error cannot create duplicates.
      GM_setValue(SYNC_KEY, {...connection, id});
-     if (syncPayload(readSyncFile(result)) !== content) throw new Error('云端内容校验失败，请重新拉取检查。');
+     if (syncPayload(await readSyncFile(result)) !== content) throw new Error('云端内容校验失败，请重新拉取检查。');
     }
     GM_setValue(SYNC_KEY, {...connection, id, baseline:content, paused:syncPayload(savedConfig()) !== content});
     syncStatus('已上传名单');
