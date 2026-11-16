@@ -197,7 +197,7 @@ function syncOptions() {
  return {id:String(value?.id || ''), token:String(value?.token || ''), baseline:value?.baseline || '', auto:value?.auto === true, paused:value?.paused === true};
 }
 function syncPayload(value) {
- return JSON.stringify({version:1, enabled:value.enabled, words:normalizeWords(value.words)});
+ return JSON.stringify({version:2, enabled:value.enabled, words:normalizeWords(value.words)});
 }
 const SYNC_AAD = 's1-anti-misfilter:v2';
 function cryptoAPI() {
@@ -221,16 +221,14 @@ async function encryptSyncContent(content) {
  if (result.length > 500000) throw new Error('加密后的名单过大，无法同步。');
  return result;
 }
-function legacySyncFile(gist) {
- return JSON.parse(gist.files[SYNC_FILE].content).version === 1;
-}
 async function readSyncFile(gist) {
  const file = gist?.files?.[SYNC_FILE];
  if (!file) throw new Error('Gist 中没有本脚本的同步文件。');
  if (file.truncated || typeof file.content !== 'string' || file.content.length > 500000) throw new Error('同步文件过大或不完整。');
  let data;
  try { data = JSON.parse(file.content); } catch { throw new Error('同步文件格式错误。'); }
- if (data?.version === 2) {
+ if (data?.version !== 2) throw new Error('同步文件格式不受支持，请使用加密同步文件。');
+ {
   try {
    if (data.algorithm !== 'AES-256-GCM' || data.kdf !== 'PBKDF2-SHA256' || data.iterations !== 100000) throw new Error();
    const salt = fromBase64(data.salt), iv = fromBase64(data.iv), ciphertext = fromBase64(data.data);
@@ -239,7 +237,7 @@ async function readSyncFile(gist) {
    data = JSON.parse(new TextDecoder('utf-8', {fatal:true}).decode(plain));
   } catch { throw new Error('同步文件解密失败或内容被修改，请确认使用 HTTPS 和支持加密的浏览器。'); }
  }
- if (data?.version !== 1 || typeof data.enabled !== 'boolean' || typeof data.words !== 'string') throw new Error('同步文件版本或内容不受支持。');
+ if (data?.version !== 2 || typeof data.enabled !== 'boolean' || typeof data.words !== 'string') throw new Error('同步文件版本或内容不受支持。');
  return {enabled:data.enabled, words:normalizeWords(data.words)};
 }
 function gistRequest(method, id, token, data, page = 0) {
@@ -356,13 +354,12 @@ async function autoSync(reason = 'check') {
    const remote = await readSyncFile(gist), remoteContent = syncPayload(remote);
    ensureUnchanged();
    const commitBaseline = () => GM_setValue(SYNC_KEY, {...options, baseline:remoteContent});
-   const migrate = reason === 'save' && remoteContent === content && legacySyncFile(gist);
-   if (remoteContent === content && !migrate) {
+   if (remoteContent === content) {
     commitBaseline(); syncStatus('已同步'); return {ok:true};
    }
    const baseline = options.baseline;
    const pristineInstall = !baseline && !snapshot.words && snapshot.enabled;
-   if (!migrate && (baseline === content || pristineInstall) && (reason !== 'save' || (discovered && pristineInstall))) {
+   if ((baseline === content || pristineInstall) && (reason !== 'save' || (discovered && pristineInstall))) {
     // Never replace a draft opened while the network request was in flight.
     if (refreshSettings && reason !== 'save') return {skipped:true};
     ensureUnchanged();
@@ -372,7 +369,7 @@ async function autoSync(reason = 'check') {
     syncStatus('已自动拉取云端名单');
     return {ok:true, pulled:true};
    }
-   if (!migrate && (!baseline || remoteContent !== baseline)) {
+   if (!baseline || remoteContent !== baseline) {
     syncStatus('同步冲突：请在设置中手动上传或拉取名单。', true);
     return {conflict:true};
    }
@@ -520,7 +517,7 @@ function settings() {
      if (gist.public !== false) throw new Error('请使用 Secret Gist，以免名单出现在公开列表中。');
      const remote = await readSyncFile(gist);
      const remoteContent = syncPayload(remote);
-     if (remoteContent !== content || legacySyncFile(gist)) {
+     if (remoteContent !== content) {
       const conflict = !connection.baseline || remoteContent !== connection.baseline;
       if (remoteContent !== content && !confirm(conflict ? '云端名单有变化或尚未建立同步基线。用当前名单覆盖云端？' : '将当前名单和开关上传并覆盖云端？')) {
        get('status').textContent = '已取消上传。'; return;
