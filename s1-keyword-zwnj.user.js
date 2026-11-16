@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.5.0
+// @version      1.5.1
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -90,7 +90,8 @@ function collect(root) {
 }
 let toastHost = null, toastTimer, toastMessage;
 function showReplacementToast(count) { showToast(`已自动处理${count}个词汇以防误伤`); }
-function showToast(message) {
+function showToast(message, duration = 2500) {
+ if (!document.body) { document.addEventListener('DOMContentLoaded', () => showToast(message, duration), {once:true}); return; }
  // Feedback must never interrupt submission or steal editor focus.
  try {
   if (!toastHost?.isConnected) {
@@ -103,7 +104,7 @@ function showToast(message) {
   }
   toastMessage.textContent = message;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toastHost?.remove(); toastHost = null; }, 2500);
+  toastTimer = setTimeout(() => { toastHost?.remove(); toastHost = null; }, duration);
  } catch { /* Notification failure must not block sending. */ }
 }
 function prepare(root, resume) {
@@ -303,10 +304,11 @@ function savedConfig() {
  const value = GM_getValue('accidental-phrases-v3', {enabled:true, words:''});
  return {enabled:value?.enabled !== false, words:normalizeWords(value?.words)};
 }
+let renderSyncStatus = null;
 function syncStatus(message, notify = false) {
- const old = GM_getValue(SYNC_STATUS, '');
- GM_setValue(SYNC_STATUS, message);
- if (notify && old !== message) showToast(message);
+ try { GM_setValue(SYNC_STATUS, message); } catch { /* Still show feedback if storage is unavailable. */ }
+ renderSyncStatus?.(message);
+ if (notify) showToast(message, 8000);
 }
 async function withSyncLease(action) {
  if (syncInFlight) return {skipped:true};
@@ -411,10 +413,12 @@ function settings() {
  textarea{display:block;width:100%;height:240px;max-height:45vh;padding:10px;border:1px solid #aaa;border-radius:6px;font:inherit;background:#fff;color:#222;resize:vertical}
  p{font-size:13px;color:#666;margin:10px 0}button{padding:7px 18px;margin-right:8px;cursor:pointer}
  details{margin:16px 0}summary{cursor:pointer}details input:not([type="checkbox"]){width:100%;padding:6px;font:inherit}details button{margin-bottom:8px}
+ #status{position:sticky;top:0;z-index:1;padding:10px;border-radius:6px;background:#f0f0f0;overflow-wrap:anywhere}#status[data-error="true"]{background:#fff0f0;color:#a21b1b;border:1px solid #d66}
  #status:empty{display:none}
  @media(prefers-color-scheme:dark){section{background:#252525;color:#eee}textarea{background:#181818;color:#eee;border-color:#777}p{color:#bbb}}
  </style><section role="dialog" aria-modal="true" aria-labelledby="title">
  <h2 id="title">S1 误伤修正名单</h2>
+ <p id="status" role="status" aria-live="polite"></p>
  <label><input id="enabled" type="checkbox"> 启用发送前修正</label>
  <label for="words">词汇名单</label><textarea id="words" aria-describedby="hint" spellcheck="false"></textarea>
  <p id="hint">每行一个词，至少两个字符。保存时自动去重、清理空行；区分大小写。</p>
@@ -425,9 +429,18 @@ function settings() {
  <label>Gist ID（可选）<input id="sync-id" type="text" spellcheck="false" placeholder="留空自动查找或创建"></label>
  <button id="upload" type="button">上传当前名单</button><button id="download" type="button">拉取名单</button>
  </details>
- <p id="status" role="status" aria-live="polite"></p>
  <button id="save" type="button">保存</button><button id="close" type="button">取消</button></section>`;
  const get = id => shadow.getElementById(id);
+ const status = message => {
+  const element = get('status');
+  element.textContent = message;
+  const error = /失败|未完成|冲突|稍后重试/.test(message);
+  element.setAttribute?.('data-error', String(error));
+  element.setAttribute?.('role', error ? 'alert' : 'status');
+  if (error) element.scrollIntoView?.({block:'nearest'});
+ };
+ renderSyncStatus = status;
+ const reportError = message => syncStatus(message, true);
  let syncing = false, pulledBaseline = null;
  const initialSync = syncOptions();
  get('sync-token').value = initialSync.token;
@@ -439,7 +452,7 @@ function settings() {
   get('enabled').checked = config.enabled;
   get('words').value = config.words;
   baseline = {...config};
-  get('status').textContent = GM_getValue(SYNC_STATUS, '');
+  status(GM_getValue(SYNC_STATUS, ''));
  };
  fill();
  refreshSettings = () => {
@@ -449,6 +462,7 @@ function settings() {
  const close = () => {
   if (syncing) return;
   refreshSettings = null;
+  renderSyncStatus = null;
   host.remove();
   if (previousFocus?.isConnected) previousFocus.focus();
  };
@@ -473,10 +487,14 @@ function settings() {
     get('sync-id').value = syncOptions().id;
     syncing = false;
     ['enabled','words','save','upload','download','sync-token','sync-password','sync-id','sync-auto'].forEach(name => { get(name).disabled = false; });
-    if (!result?.ok) { get('status').textContent = result?.skipped ? '已保存到本地，等待下一次同步检查。' : GM_getValue(SYNC_STATUS, '已保存到本地。'); return; }
+    if (!result?.ok) { status(result?.skipped ? '已保存到本地，尚未同步，请稍后重试。' : GM_getValue(SYNC_STATUS, '已保存到本地。')); return; }
    }
    close();
-  } catch (error) { get('status').textContent = '保存失败：' + error.message; }
+  } catch (error) {
+   syncing = false;
+   ['enabled','words','save','upload','download','sync-token','sync-password','sync-id','sync-auto'].forEach(name => { get(name).disabled = false; });
+   reportError('保存失败：' + error.message);
+  }
  };
  const sync = async (direction, leased = false) => {
   if (syncing || (syncInFlight && !leased)) { get('status').textContent = '同步正在进行，请稍后重试。'; return; }
@@ -513,7 +531,7 @@ function settings() {
     get('enabled').checked = remote.enabled;
     get('words').value = remote.words;
     pulledBaseline = {id, content:syncPayload(remote)};
-    get('status').textContent = '已拉取，请点击保存生效。';
+    syncStatus('已拉取，请点击保存生效。');
    } else {
     const content = syncPayload(snapshot);
     if (id) {
@@ -549,18 +567,18 @@ function settings() {
     pulledBaseline = null;
     get('status').textContent = '已上传。当前编辑内容仍需点击保存才能在本机生效。';
    }
-  } catch (error) { get('status').textContent = '同步失败：' + error.message; }
+  } catch (error) { reportError('同步失败：' + error.message); }
   finally {
    syncing = false;
    controls.forEach(name => { get(name).disabled = false; });
   }
  };
- const manualSync = direction => {
-  if (syncing || syncInFlight) return;
-  return withSyncLease(async () => {
-   // The lease owns serialization; allow the existing UI routine to run.
-   return sync(direction, true);
-  });
+ const manualSync = async direction => {
+  if (syncing || syncInFlight) { status('同步正在进行，请稍后重试。'); return; }
+  try {
+   const result = await withSyncLease(() => sync(direction, true));
+   if (result?.skipped) status('其他页面正在同步，请稍后重试。');
+  } catch (error) { reportError('同步失败：' + error.message); }
  };
  get('upload').onclick = () => manualSync('upload');
  get('download').onclick = () => manualSync('download');
