@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.4.0
+// @version      1.4.1
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -326,16 +326,20 @@ async function withSyncLease(action) {
   return await run();
  } finally { syncInFlight = false; }
 }
+function syncDay(date = new Date()) {
+ return [date.getFullYear(), date.getMonth() + 1, date.getDate()].join('-');
+}
 async function autoSync(reason = 'check') {
  let options = syncOptions();
  if (!options.auto || options.paused || !options.token) return {skipped:true};
- if (reason === 'check' && (document.visibilityState === 'hidden' || refreshSettings)) return {skipped:true};
+ if (reason === 'check' && refreshSettings) return {skipped:true};
  try {
   return await withSyncLease(async ownsLease => {
    if (reason === 'check') {
-    const lastCheck = GM_getValue('s1-sync-last-check-v1', 0);
-    if (Date.now() - lastCheck < 30000) return {skipped:true};
-    GM_setValue('s1-sync-last-check-v1', Date.now());
+    const day = syncDay();
+    if (GM_getValue('s1-sync-check-day-v1', '') === day) return {skipped:true};
+    // Record the attempt before requesting: failures do not trigger more checks today.
+    GM_setValue('s1-sync-check-day-v1', day);
    }
    const snapshot = savedConfig(), content = syncPayload(snapshot);
    const unchanged = () => {
@@ -393,9 +397,6 @@ async function autoSync(reason = 'check') {
  }
 }
 setTimeout(() => { void autoSync(); }, 1500);
-setInterval(() => { void autoSync(); }, 60000);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void autoSync(); });
-window.addEventListener('online', () => { void autoSync(); });
 function settings() {
  if (document.getElementById('s1-filter-settings')) return;
  const previousFocus = document.activeElement;
