@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         S1 发送前关键词零宽处理
+// @name         S1 误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.0.2
+// @version      1.0.3
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -89,7 +89,7 @@ function showReplacementToast() {
    toastHost = document.createElement('div');
    toastHost.style.cssText = 'position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:2147483647;pointer-events:none;max-width:calc(100vw - 32px)';
    const shadow = toastHost.attachShadow({mode:'closed'});
-   shadow.innerHTML = `<style>:host{all:initial}div{font:14px/1.5 system-ui;color:#fff;background:#252525;padding:10px 18px;border-radius:8px;box-shadow:0 3px 14px #0003;text-align:center;overflow-wrap:anywhere}</style><div role="status" aria-live="polite" aria-atomic="true">已插入零宽字符</div>`;
+   shadow.innerHTML = `<style>:host{all:initial}div{font:14px/1.5 system-ui;color:#fff;background:#252525;padding:10px 18px;border-radius:8px;box-shadow:0 3px 14px #0003;text-align:center;overflow-wrap:anywhere}</style><div role="status" aria-live="polite" aria-atomic="true">已处理</div>`;
    document.body.append(toastHost);
   }
   clearTimeout(toastTimer);
