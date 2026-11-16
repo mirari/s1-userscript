@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1 发送前关键词零宽处理
 // @namespace    local.s1.keyword-zwnj
-// @version      1.0.1
+// @version      1.0.2
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -81,6 +81,21 @@ function collect(root) {
  }
  return items.map(item => ({...item, before:item.read()}));
 }
+let toastHost = null, toastTimer;
+function showReplacementToast() {
+ // Feedback must never interrupt submission or steal editor focus.
+ try {
+  if (!toastHost?.isConnected) {
+   toastHost = document.createElement('div');
+   toastHost.style.cssText = 'position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:2147483647;pointer-events:none;max-width:calc(100vw - 32px)';
+   const shadow = toastHost.attachShadow({mode:'closed'});
+   shadow.innerHTML = `<style>:host{all:initial}div{font:14px/1.5 system-ui;color:#fff;background:#252525;padding:10px 18px;border-radius:8px;box-shadow:0 3px 14px #0003;text-align:center;overflow-wrap:anywhere}</style><div role="status" aria-live="polite" aria-atomic="true">已插入零宽字符</div>`;
+   document.body.append(toastHost);
+  }
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastHost?.remove(); toastHost = null; }, 2500);
+ } catch { /* Notification failure must not block sending. */ }
+}
 function prepare(root, resume) {
  if (!config.enabled || !config.words) { if (resume) resume(); return; }
  if (busy) return;
@@ -93,6 +108,7 @@ function prepare(root, resume) {
   if (version !== revision || items.some(item => !item.valid() || item.read() !== item.before)) throw new Error('处理期间内容或设置发生变化，请重新点击发送。');
   items.forEach((item,i) => item.write(values[i]));
   if (items.some((item,i) => !item.valid() || item.read() !== values[i])) throw new Error('编辑器更新了内容，请重新点击发送。');
+  if (items.some((item,i) => item.before !== values[i])) showReplacementToast();
   replay = {items, values};
   try { if (resume) resume(); } finally { replay = null; }
  } catch (error) { alert('尚未发送：'+error.message); }
