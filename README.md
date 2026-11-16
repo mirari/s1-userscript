@@ -18,6 +18,22 @@
 
 名单和开关保存在本地。正文处理不联网，不上传内容。
 
+## Gist 同步
+
+在设置页展开「Gist 同步」。使用 GitHub personal access token：fine-grained token 需要用户级 Gists 读写权限，classic token 需要 `gist` scope。
+
+- 第一台设备：填令牌，Gist ID 留空，点击「上传当前名单」创建 Secret Gist。保留返回的 Gist ID，再点击保存。
+- 其他设备：填有权限的令牌和相同的 Gist ID，点击「拉取名单」，检查后保存。
+- 上传使用当前编辑框的名单和启用状态；拉取只更新草稿，点击保存后生效。普通保存不会自动联网。
+- 连接设置在同步操作或保存时保存在本机；令牌不上传到同步文件。清空令牌后保存可移除本机凭据。
+- 云端使用独立文件 `s1-anti-misfilter.json`，不会修改 S1 Plus 的文件。
+- 覆盖云端前需要确认，并再次读取检查变化。Gist API 的读取与写入不是原子事务，仍应避免两台设备同时上传。
+- Secret Gist 不会列在公开列表中，但不是加密存储，知道链接的人可以读取；Gist 也会保留历史版本。
+
+同步仅发送名单和启用状态，不发送帖子内容。网络失败保留本地数据；创建请求超时时请先在 GitHub 检查是否已创建，避免重复创建。
+
+实现参考了 S1 Plus 的连接信息隔离、同步基线与上传前版本检查思路。API 依据 [GitHub Gists 文档](https://docs.github.com/en/rest/gists/gists)。
+
 ## 安装和更新
 
 安装 Tampermonkey 后打开上方链接安装，刷新 S1 页面。交付文件只有 `s1-keyword-zwnj.user.js`。
