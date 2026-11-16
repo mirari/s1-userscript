@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         S1 误伤修正
+// @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.0.3
+// @version      1.0.4
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -32,14 +32,19 @@ let local = makeLocal(config.words);
 function makeLocal(words) {
  const list = normalizeWords(words).split('\n').filter(Boolean);
  // Mark all overlapping matches; metacharacters remain literal.
- return text => {
+ return (text, changedWords) => {
   const raw = Array.from(text), chars = [], pos = [];
   raw.forEach((ch,i) => { if (ch !== Z) { chars.push(ch); pos.push(i); } });
   const marks = new Set();
   for (const word of list) {
    const w = Array.from(word);
    for (let i = 0; i <= chars.length - w.length; i++) {
-    if (w.every((ch,j) => ch === chars[i+j])) for (let j = i; j < i+w.length-1; j++) marks.add(pos[j]);
+    if (w.every((ch,j) => ch === chars[i+j])) {
+     for (let j = i; j < i+w.length-1; j++) {
+      marks.add(pos[j]);
+      if (raw[pos[j]+1] !== Z) changedWords?.add(word);
+     }
+    }
    }
   }
   return raw.map((ch,i) => ch + (marks.has(i) && raw[i+1] !== Z ? Z : '')).join('');
@@ -81,17 +86,19 @@ function collect(root) {
  }
  return items.map(item => ({...item, before:item.read()}));
 }
-let toastHost = null, toastTimer;
-function showReplacementToast() {
+let toastHost = null, toastTimer, toastMessage;
+function showReplacementToast(count) {
  // Feedback must never interrupt submission or steal editor focus.
  try {
   if (!toastHost?.isConnected) {
    toastHost = document.createElement('div');
    toastHost.style.cssText = 'position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:2147483647;pointer-events:none;max-width:calc(100vw - 32px)';
    const shadow = toastHost.attachShadow({mode:'closed'});
-   shadow.innerHTML = `<style>:host{all:initial}div{font:14px/1.5 system-ui;color:#fff;background:#252525;padding:10px 18px;border-radius:8px;box-shadow:0 3px 14px #0003;text-align:center;overflow-wrap:anywhere}</style><div role="status" aria-live="polite" aria-atomic="true">已处理</div>`;
+   shadow.innerHTML = `<style>:host{all:initial}div{font:14px/1.5 system-ui;color:#fff;background:#252525;padding:10px 18px;border-radius:8px;box-shadow:0 3px 14px #0003;text-align:center;overflow-wrap:anywhere}</style><div id="message" role="status" aria-live="polite" aria-atomic="true"></div>`;
+   toastMessage = shadow.getElementById('message');
    document.body.append(toastHost);
   }
+  toastMessage.textContent = `已自动处理${count}个词汇以防误伤`;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toastHost?.remove(); toastHost = null; }, 2500);
  } catch { /* Notification failure must not block sending. */ }
@@ -104,11 +111,12 @@ function prepare(root, resume) {
  try {
   const items = collect(root);
   if (!items.length) throw new Error('未识别到消息编辑框，请使用标准发帖或私信编辑器。');
-  const values = items.map(item => local(item.before));
+  const changedWords = new Set();
+  const values = items.map(item => local(item.before, changedWords));
   if (version !== revision || items.some(item => !item.valid() || item.read() !== item.before)) throw new Error('处理期间内容或设置发生变化，请重新点击发送。');
   items.forEach((item,i) => item.write(values[i]));
   if (items.some((item,i) => !item.valid() || item.read() !== values[i])) throw new Error('编辑器更新了内容，请重新点击发送。');
-  if (items.some((item,i) => item.before !== values[i])) showReplacementToast();
+  if (changedWords.size) showReplacementToast(changedWords.size);
   replay = {items, values};
   try { if (resume) resume(); } finally { replay = null; }
  } catch (error) { alert('尚未发送：'+error.message); }
