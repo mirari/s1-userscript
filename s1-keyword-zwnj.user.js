@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.0.4
+// @version      1.0.5
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
-// @description  纯离线修正自定义普通表达误伤，不接入敏感词库
+// @description  发送前自动处理自定义词汇，减少论坛屏蔽词误伤。
 // @match        *://*.saraba1st.com/*
 // @match        *://*.stage1st.com/*
 // @run-at       document-start
