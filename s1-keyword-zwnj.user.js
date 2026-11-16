@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1 发送前关键词零宽处理
 // @namespace    local.s1.keyword-zwnj
-// @version      1.0.0
+// @version      1.0.1
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -11,7 +11,7 @@
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_setClipboard
+// @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
 // @noframes
 // ==/UserScript==
@@ -24,9 +24,6 @@ const SEND = '#postsubmit,#fastpostsubmit,#pmsubmit,button[type="submit"],input[
 // No bundled words. Previously saved user settings remain local.
 function normalizeWords(text) {
  return [...new Set(String(text ?? '').split(/\r?\n/).map(w => w.replaceAll(Z, '').trim()).filter(w => Array.from(w).length > 1))].join('\n');
-}
-function mergeWords(current, incoming, replace = false) {
- return normalizeWords(replace ? incoming : current + '\n' + incoming);
 }
 const saved = GM_getValue('accidental-phrases-v3', {enabled:true, words:''});
 let config = {enabled:saved?.enabled !== false, words:normalizeWords(saved?.words)};
@@ -134,7 +131,10 @@ function keydown(event, root = document) {
   button.click();
  });
 }
-window.addEventListener('keydown', event => keydown(event), true);
+window.addEventListener('keydown', event => {
+ if (document.getElementById('s1-filter-settings')) return;
+ keydown(event);
+}, true);
 const watched = new WeakSet(), documents = new WeakSet();
 function watchFrames() {
  for (const frame of document.querySelectorAll('iframe#e_iframe')) {
@@ -152,81 +152,78 @@ function watchFrames() {
  }
 }
 new MutationObserver(watchFrames).observe(document,{childList:true,subtree:true});
+let refreshSettings = null;
+function applyConfig(value) {
+ config = {enabled:value?.enabled !== false, words:normalizeWords(value?.words)};
+ revision++;
+ local = makeLocal(config.words);
+}
+GM_addValueChangeListener('accidental-phrases-v3', (_name, _old, value, remote) => {
+ if (!remote) return;
+ applyConfig(value);
+ refreshSettings?.();
+});
 function settings() {
  if (document.getElementById('s1-filter-settings')) return;
+ const previousFocus = document.activeElement;
  const host = document.createElement('div');
  host.id = 's1-filter-settings';
  host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#0007;display:grid;place-items:center';
  const shadow = host.attachShadow({mode:'closed'});
  shadow.innerHTML = `<style>
- *{box-sizing:border-box} section{font:15px/1.6 system-ui;background:white;color:#222;padding:24px;border-radius:12px;width:min(560px,94vw);max-height:90vh;overflow:auto}
- h2{margin:0 0 12px}label{display:block;margin:12px 0}textarea{display:block;width:100%;padding:8px;border:1px solid #aaa;border-radius:5px;font:inherit}
- textarea{height:160px}p{font-size:13px;color:#555}button{padding:7px 16px;margin-right:8px;cursor:pointer}
- </style><section><h2>S1 普通表达误伤修正</h2>
+ :host{color-scheme:light dark}*{box-sizing:border-box}
+ section{font:15px/1.6 system-ui;background:#fff;color:#222;padding:24px;border-radius:12px;width:min(520px,94vw);max-height:90vh;overflow:auto}
+ h2{font-size:20px;margin:0 0 16px}label{display:block;margin:12px 0}
+ textarea{display:block;width:100%;height:240px;max-height:45vh;padding:10px;border:1px solid #aaa;border-radius:6px;font:inherit;background:#fff;color:#222;resize:vertical}
+ p{font-size:13px;color:#666;margin:10px 0}button{padding:7px 18px;margin-right:8px;cursor:pointer}
+ #status:empty{display:none}
+ @media(prefers-color-scheme:dark){section{background:#252525;color:#eee}textarea{background:#181818;color:#eee;border-color:#777}p{color:#bbb}}
+ </style><section role="dialog" aria-modal="true" aria-labelledby="title">
+ <h2 id="title">S1 误伤修正名单</h2>
  <label><input id="enabled" type="checkbox"> 启用发送前修正</label>
- <p>名单完全由你维护，新安装时为空，处理正文不联网。</p>
- <label>词汇（每行一个，至少两个字符）<textarea id="words"></textarea></label>
- <p>支持直接增删、粘贴及去重。保存、导入和导出时自动去重，忽略空行和单字符，保留大小写区别。</p>
- <button id="dedupe" type="button">整理去重</button><button id="import" type="button">从剪贴板导入</button><button id="export" type="button">导出到剪贴板</button>
- <div id="import-panel" hidden>
- <label>导入方式 <select id="mode"><option value="merge">合并现有名单</option><option value="replace">替换现有名单</option></select></label>
- <label>待导入内容（浏览器不允许读取剪贴板时，可在此粘贴）<textarea id="incoming"></textarea></label>
- <button id="apply-import" type="button">应用导入</button><button id="cancel-import" type="button">取消导入</button>
- </div>
+ <label for="words">词汇名单</label><textarea id="words" aria-describedby="hint" spellcheck="false"></textarea>
+ <p id="hint">每行一个词，至少两个字符。保存时自动去重、清理空行；区分大小写。</p>
  <p id="status" role="status" aria-live="polite"></p>
- <p>修改和导入后点击保存生效。导出复制当前编辑框内容，不会自动保存。链接和代码内插入字符可能影响使用。</p>
  <button id="save" type="button">保存</button><button id="close" type="button">取消</button></section>`;
  const get = id => shadow.getElementById(id);
- get('enabled').checked = config.enabled;
- get('words').value = config.words;
- const status = text => { get('status').textContent = text; };
- const count = text => text ? text.split('\n').length : 0;
- const tidy = () => {
-  get('words').value = normalizeWords(get('words').value);
-  status('当前共 ' + count(get('words').value) + ' 项；点击保存生效。');
+ let baseline;
+ const fill = () => {
+  get('enabled').checked = config.enabled;
+  get('words').value = config.words;
+  baseline = {...config};
+  get('status').textContent = '';
  };
- get('dedupe').onclick = tidy;
- get('import').onclick = async () => {
-  get('import-panel').hidden = false;
-  get('incoming').value = '';
-  get('mode').value = 'merge';
-  status('正在读取剪贴板……');
-  try {
-   const text = await navigator.clipboard.readText();
-   if (!host.isConnected || get('import-panel').hidden) return;
-   // Do not overwrite anything the user pasted while permission was pending.
-   if (!get('incoming').value) get('incoming').value = text;
-   status('请检查待导入内容和导入方式，再点击应用导入。');
-  } catch {
-   if (host.isConnected) status('浏览器未允许读取剪贴板，请在待导入框中手动粘贴。');
-  }
+ fill();
+ refreshSettings = () => {
+  if (get('words').value === baseline.words && get('enabled').checked === baseline.enabled) fill();
+  else get('status').textContent = '其他页面已更新设置。当前草稿已保留，保存将覆盖新设置。';
  };
- get('apply-import').onclick = () => {
-  get('words').value = mergeWords(get('words').value, get('incoming').value, get('mode').value === 'replace');
-  get('incoming').value = '';
-  get('import-panel').hidden = true;
-  tidy();
+ const close = () => {
+  refreshSettings = null;
+  host.remove();
+  if (previousFocus?.isConnected) previousFocus.focus();
  };
- get('cancel-import').onclick = () => { get('import-panel').hidden = true; get('incoming').value = ''; };
- get('export').onclick = () => {
-  tidy();
-  try {
-   GM_setClipboard(get('words').value, 'text');
-   status('已复制 ' + count(get('words').value) + ' 项到剪贴板。');
-  } catch { status('复制失败，请选中名单后手动复制。'); }
- };
- tidy();
- get('close').onclick = () => host.remove();
+ get('close').onclick = close;
  get('save').onclick = () => {
   try {
    const next = {enabled:get('enabled').checked, words:normalizeWords(get('words').value)};
-   config = next; revision++; local = makeLocal(config.words);
-   GM_setValue('accidental-phrases-v3', config); host.remove();
-  } catch (error) { alert(error.message); }
+   GM_setValue('accidental-phrases-v3', next);
+   applyConfig(next);
+   close();
+  } catch (error) { get('status').textContent = '保存失败：' + error.message; }
  };
+ shadow.addEventListener('keydown', event => {
+  event.stopPropagation();
+  if (event.key === 'Escape') { event.preventDefault(); close(); }
+  if (event.key === 'Tab') {
+   const first = get('enabled'), last = get('close');
+   if (event.shiftKey && shadow.activeElement === first) { event.preventDefault(); last.focus(); }
+   else if (!event.shiftKey && shadow.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+ });
  document.body.append(host);
+ get('words').focus();
 }
 GM_registerMenuCommand('管理误伤修正名单', settings);
 GM_registerMenuCommand('立即处理当前内容（不发送）', () => prepare(document));
 })();
-
