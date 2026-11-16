@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.5.2
+// @version      1.5.3
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -595,5 +595,4 @@ function settings() {
  get('words').focus();
 }
 GM_registerMenuCommand('管理误伤修正名单', settings);
-GM_registerMenuCommand('立即处理当前内容（不发送）', () => prepare(document));
 })();
