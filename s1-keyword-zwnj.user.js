@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.1.0
+// @version      1.2.0
 // @homepageURL  https://github.com/mirari/s1-userscript
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
@@ -89,7 +89,8 @@ function collect(root) {
  return items.map(item => ({...item, before:item.read()}));
 }
 let toastHost = null, toastTimer, toastMessage;
-function showReplacementToast(count) {
+function showReplacementToast(count) { showToast(`已自动处理${count}个词汇以防误伤`); }
+function showToast(message) {
  // Feedback must never interrupt submission or steal editor focus.
  try {
   if (!toastHost?.isConnected) {
@@ -100,7 +101,7 @@ function showReplacementToast(count) {
    toastMessage = shadow.getElementById('message');
    document.body.append(toastHost);
   }
-  toastMessage.textContent = `已自动处理${count}个词汇以防误伤`;
+  toastMessage.textContent = message;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toastHost?.remove(); toastHost = null; }, 2500);
  } catch { /* Notification failure must not block sending. */ }
@@ -193,7 +194,7 @@ const SYNC_KEY = 's1-gist-sync-v1';
 const SYNC_FILE = 's1-anti-misfilter.json';
 function syncOptions() {
  const value = GM_getValue(SYNC_KEY, {});
- return {id:String(value?.id || ''), token:String(value?.token || ''), baseline:value?.baseline || ''};
+ return {id:String(value?.id || ''), token:String(value?.token || ''), baseline:value?.baseline || '', auto:value?.auto === true, paused:value?.paused === true};
 }
 function syncPayload(value) {
  return JSON.stringify({version:1, enabled:value.enabled, words:normalizeWords(value.words)});
@@ -228,6 +229,97 @@ function gistRequest(method, id, token, data) {
   });
  });
 }
+let syncInFlight = false;
+const SYNC_STATUS = 's1-sync-status-v1';
+const SYNC_LOCK = 's1-sync-lease-v1';
+function savedConfig() {
+ const value = GM_getValue('accidental-phrases-v3', {enabled:true, words:''});
+ return {enabled:value?.enabled !== false, words:normalizeWords(value?.words)};
+}
+function syncStatus(message, notify = false) {
+ const old = GM_getValue(SYNC_STATUS, '');
+ GM_setValue(SYNC_STATUS, message);
+ if (notify && old !== message) showToast(message);
+}
+async function withSyncLease(action) {
+ if (syncInFlight) return {skipped:true};
+ syncInFlight = true;
+ const owner = Date.now() + ':' + Math.random();
+ const run = async () => {
+  const held = GM_getValue(SYNC_LOCK, null);
+  if (held?.expires > Date.now()) return {skipped:true};
+  GM_setValue(SYNC_LOCK, {owner, expires:Date.now() + 120000});
+  if (GM_getValue(SYNC_LOCK, null)?.owner !== owner) return {skipped:true};
+  try { return await action(() => GM_getValue(SYNC_LOCK, null)?.owner === owner); }
+  finally { if (GM_getValue(SYNC_LOCK, null)?.owner === owner) GM_setValue(SYNC_LOCK, null); }
+ };
+ try {
+  // Web Locks serialize same-origin tabs; the storage lease also covers S1 aliases.
+  if (navigator.locks?.request) return await navigator.locks.request('s1-gist-sync', {ifAvailable:true}, lock => lock ? run() : {skipped:true});
+  return await run();
+ } finally { syncInFlight = false; }
+}
+async function autoSync(reason = 'check') {
+ const options = syncOptions();
+ if (!options.auto || options.paused || !options.id || !options.token) return {skipped:true};
+ if (reason === 'check' && (document.visibilityState === 'hidden' || refreshSettings)) return {skipped:true};
+ try {
+  return await withSyncLease(async ownsLease => {
+   if (reason === 'check') {
+    const lastCheck = GM_getValue('s1-sync-last-check-v1', 0);
+    if (Date.now() - lastCheck < 30000) return {skipped:true};
+    GM_setValue('s1-sync-last-check-v1', Date.now());
+   }
+   const snapshot = savedConfig(), content = syncPayload(snapshot);
+   const unchanged = () => {
+    const current = syncOptions();
+    return ownsLease() && current.auto && !current.paused && current.id === options.id && current.token === options.token && current.baseline === options.baseline && syncPayload(savedConfig()) === content;
+   };
+   const ensureUnchanged = () => { if (!unchanged()) throw new Error('设置已变化，等待下次同步。'); };
+   const gist = await gistRequest('GET', options.id, options.token);
+   const remote = readSyncFile(gist), remoteContent = syncPayload(remote);
+   ensureUnchanged();
+   const commitBaseline = () => GM_setValue(SYNC_KEY, {...options, baseline:remoteContent});
+   if (remoteContent === content) {
+    commitBaseline(); syncStatus('已同步'); return {ok:true};
+   }
+   const baseline = options.baseline;
+   const pristineInstall = !baseline && !snapshot.words && snapshot.enabled;
+   if ((baseline === content || pristineInstall) && reason !== 'save') {
+    // Never replace a draft opened while the network request was in flight.
+    if (refreshSettings) return {skipped:true};
+    ensureUnchanged();
+    GM_setValue('accidental-phrases-v3', remote);
+    applyConfig(remote);
+    commitBaseline();
+    syncStatus('已自动拉取云端名单');
+    return {ok:true, pulled:true};
+   }
+   if (!baseline || remoteContent !== baseline) {
+    syncStatus('同步冲突：请在设置中手动上传或拉取名单。', true);
+    return {conflict:true};
+   }
+   if (gist.public !== false) throw new Error('自动上传需要 Secret Gist。');
+   const latest = await gistRequest('GET', options.id, options.token);
+   ensureUnchanged();
+   if (latest.public !== false || syncPayload(readSyncFile(latest)) !== remoteContent) throw new Error('云端已变化，等待下次同步。');
+   const result = await gistRequest('PATCH', options.id, options.token, {files:{[SYNC_FILE]:{content}}});
+   if (syncPayload(readSyncFile(result)) !== content) throw new Error('云端内容校验失败，请手动检查。');
+   ensureUnchanged();
+   GM_setValue(SYNC_KEY, {...options, baseline:content});
+   syncStatus('已自动上传名单');
+   return {ok:true, uploaded:true};
+  });
+ } catch (error) {
+  const message = '自动同步未完成：' + error.message;
+  syncStatus(message, true);
+  return {error:message};
+ }
+}
+setTimeout(() => { void autoSync(); }, 1500);
+setInterval(() => { void autoSync(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void autoSync(); });
+window.addEventListener('online', () => { void autoSync(); });
 function settings() {
  if (document.getElementById('s1-filter-settings')) return;
  const previousFocus = document.activeElement;
@@ -241,7 +333,7 @@ function settings() {
  h2{font-size:20px;margin:0 0 16px}label{display:block;margin:12px 0}
  textarea{display:block;width:100%;height:240px;max-height:45vh;padding:10px;border:1px solid #aaa;border-radius:6px;font:inherit;background:#fff;color:#222;resize:vertical}
  p{font-size:13px;color:#666;margin:10px 0}button{padding:7px 18px;margin-right:8px;cursor:pointer}
- details{margin:16px 0}summary{cursor:pointer}details input{width:100%;padding:6px;font:inherit}details button{margin-bottom:8px}
+ details{margin:16px 0}summary{cursor:pointer}details input:not([type="checkbox"]){width:100%;padding:6px;font:inherit}details button{margin-bottom:8px}
  #status:empty{display:none}
  @media(prefers-color-scheme:dark){section{background:#252525;color:#eee}textarea{background:#181818;color:#eee;border-color:#777}p{color:#bbb}}
  </style><section role="dialog" aria-modal="true" aria-labelledby="title">
@@ -250,26 +342,25 @@ function settings() {
  <label for="words">词汇名单</label><textarea id="words" aria-describedby="hint" spellcheck="false"></textarea>
  <p id="hint">每行一个词，至少两个字符。保存时自动去重、清理空行；区分大小写。</p>
  <details><summary>Gist 同步</summary>
- <p>同步名单和启用状态。首次上传可自动创建 Secret Gist；换设备后填入同一个 ID。</p>
+ <label><input id="sync-auto" type="checkbox"> 自动同步</label>
  <label>GitHub 令牌<input id="sync-token" type="password" autocomplete="off" spellcheck="false"></label>
  <label>Gist ID<input id="sync-id" type="text" spellcheck="false" placeholder="首次上传可留空"></label>
- <p>令牌需具有 Gists 读写权限，仅在本机保存。Secret Gist 不是加密存储，知道链接的人可读取。</p>
  <button id="upload" type="button">上传当前名单</button><button id="download" type="button">拉取名单</button>
- <p>上传使用当前编辑内容；拉取后点击保存生效。同步操作会保存连接设置。</p>
  </details>
  <p id="status" role="status" aria-live="polite"></p>
  <button id="save" type="button">保存</button><button id="close" type="button">取消</button></section>`;
  const get = id => shadow.getElementById(id);
- let syncing = false;
+ let syncing = false, pulledBaseline = null;
  const initialSync = syncOptions();
  get('sync-token').value = initialSync.token;
  get('sync-id').value = initialSync.id;
+ get('sync-auto').checked = initialSync.auto;
  let baseline;
  const fill = () => {
   get('enabled').checked = config.enabled;
   get('words').value = config.words;
   baseline = {...config};
-  get('status').textContent = '';
+  get('status').textContent = GM_getValue(SYNC_STATUS, '');
  };
  fill();
  refreshSettings = () => {
@@ -283,21 +374,32 @@ function settings() {
   if (previousFocus?.isConnected) previousFocus.focus();
  };
  get('close').onclick = close;
- get('save').onclick = () => {
+ get('save').onclick = async () => {
   try {
    const next = {enabled:get('enabled').checked, words:normalizeWords(get('words').value)};
    const oldSync = syncOptions();
    const id = get('sync-id').value.trim();
    if (id && !/^[a-f0-9]{20,64}$/i.test(id)) throw new Error('请填写有效的 Gist ID。');
-   GM_setValue(SYNC_KEY, {id, token:get('sync-token').value.trim(), baseline:id === oldSync.id ? oldSync.baseline : ''});
+   const token = get('sync-token').value.trim(), auto = get('sync-auto').checked;
+   if (auto && (!id || !token)) throw new Error('自动同步需要令牌和 Gist ID，请先上传创建或填写已有 ID。');
+   GM_setValue(SYNC_KEY, {id, token, auto, baseline:pulledBaseline?.id === id ? pulledBaseline.content : id === oldSync.id ? oldSync.baseline : ''});
    GM_setValue('accidental-phrases-v3', next);
    applyConfig(next);
+   if (auto) {
+    syncing = true;
+    ['enabled','words','save','upload','download','sync-token','sync-id','sync-auto'].forEach(name => { get(name).disabled = true; });
+    get('status').textContent = '已保存到本地，正在同步……';
+    const result = await autoSync('save');
+    syncing = false;
+    ['enabled','words','save','upload','download','sync-token','sync-id','sync-auto'].forEach(name => { get(name).disabled = false; });
+    if (!result?.ok) { get('status').textContent = result?.skipped ? '已保存到本地，等待下一次同步检查。' : GM_getValue(SYNC_STATUS, '已保存到本地。'); return; }
+   }
    close();
   } catch (error) { get('status').textContent = '保存失败：' + error.message; }
  };
- const sync = async direction => {
-  if (syncing) return;
-  const controls = ['enabled','words','save','close','upload','download','sync-token','sync-id'];
+ const sync = async (direction, leased = false) => {
+  if (syncing || (syncInFlight && !leased)) { get('status').textContent = '同步正在进行，请稍后重试。'; return; }
+  const controls = ['enabled','words','save','close','upload','download','sync-token','sync-id','sync-auto'];
   const snapshot = {enabled:get('enabled').checked, words:normalizeWords(get('words').value)};
   const draft = get('words').value, version = revision;
   let id = get('sync-id').value.trim();
@@ -311,7 +413,7 @@ function settings() {
    if (direction === 'download' && !id) throw new Error('请先填写 Gist ID。');
    if (id && !/^[a-f0-9]{20,64}$/i.test(id)) throw new Error('请填写有效的 Gist ID。');
    if (!token || /\s/.test(token)) throw new Error('请填写有效的 GitHub 令牌。');
-   const connection = {id, token, baseline:id === previous.id ? previous.baseline : ''};
+   const connection = {id, token, auto:get('sync-auto').checked, baseline:id === previous.id ? previous.baseline : ''};
    GM_setValue(SYNC_KEY, connection);
    if (direction === 'download') {
     const remote = readSyncFile(await gistRequest('GET', id, token));
@@ -321,7 +423,7 @@ function settings() {
     }
     get('enabled').checked = remote.enabled;
     get('words').value = remote.words;
-    GM_setValue(SYNC_KEY, {...connection, baseline:syncPayload(remote)});
+    pulledBaseline = {id, content:syncPayload(remote)};
     get('status').textContent = '已拉取，请点击保存生效。';
    } else {
     const content = syncPayload(snapshot);
@@ -351,7 +453,9 @@ function settings() {
      GM_setValue(SYNC_KEY, {...connection, id});
      if (syncPayload(readSyncFile(result)) !== content) throw new Error('云端内容校验失败，请重新拉取检查。');
     }
-    GM_setValue(SYNC_KEY, {id, token, baseline:content});
+    GM_setValue(SYNC_KEY, {...connection, id, baseline:content, paused:syncPayload(savedConfig()) !== content});
+    syncStatus('已上传名单');
+    pulledBaseline = null;
     get('status').textContent = '已上传。当前编辑内容仍需点击保存才能在本机生效。';
    }
   } catch (error) { get('status').textContent = '同步失败：' + error.message; }
@@ -360,8 +464,15 @@ function settings() {
    controls.forEach(name => { get(name).disabled = false; });
   }
  };
- get('upload').onclick = () => sync('upload');
- get('download').onclick = () => sync('download');
+ const manualSync = direction => {
+  if (syncing || syncInFlight) return;
+  return withSyncLease(async () => {
+   // The lease owns serialization; allow the existing UI routine to run.
+   return sync(direction, true);
+  });
+ };
+ get('upload').onclick = () => manualSync('upload');
+ get('download').onclick = () => manualSync('download');
  shadow.addEventListener('keydown', event => {
   event.stopPropagation();
   if (event.key === 'Escape') { event.preventDefault(); close(); }
