@@ -1,8 +1,11 @@
 // ==UserScript==
 // @name         S1防误伤修正
 // @namespace    local.s1.keyword-zwnj
-// @version      1.5.3
+// @version      1.5.4
+// @author       mirari
+// @license      0BSD
 // @homepageURL  https://github.com/mirari/s1-userscript
+// @supportURL   https://github.com/mirari/s1-userscript/issues
 // @updateURL    https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @downloadURL  https://raw.githubusercontent.com/mirari/s1-userscript/main/s1-keyword-zwnj.user.js
 // @description  发送前自动处理自定义词汇，减少论坛屏蔽词误伤。
